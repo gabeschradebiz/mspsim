@@ -1,0 +1,73 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+function Get-ActiveSchemeGuid {
+    $out = & powercfg /getactivescheme 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { throw "ActiveSchemeQueryFailed" }
+    $m = [regex]::Match(($out -join "`n"), '([0-9A-Fa-f-]{36})')
+    if (-not $m.Success) { throw "ActiveSchemeGuidNotFound" }
+    return $m.Value.ToLower()
+}
+
+function Get-SettingIndices {
+    param(
+        [Parameter(Mandatory=$true)][string]$SchemeGuid,
+        [Parameter(Mandatory=$true)][string]$SubGuid,
+        [Parameter(Mandatory=$true)][string]$SettingGuid
+    )
+    $out = & powercfg -q $SchemeGuid $SubGuid $SettingGuid 2>$null
+    if ($LASTEXITCODE -ne 0 -or -not $out) { throw "PowerCfgQueryFailed:$SettingGuid" }
+    $text = ($out -join "`n")
+    $acMatch = [regex]::Match($text, 'Current AC Power Setting Index:\s*0x([0-9A-Fa-f]+)')
+    $dcMatch = [regex]::Match($text, 'Current DC Power Setting Index:\s*0x([0-9A-Fa-f]+)')
+    if (-not ($acMatch.Success -and $dcMatch.Success)) { throw "IndicesNotFound:$SettingGuid" }
+    $ac = [Convert]::ToInt32($acMatch.Groups[1].Value,16)
+    $dc = [Convert]::ToInt32($dcMatch.Groups[1].Value,16)
+    return @{ AC = $ac; DC = $dc }
+}
+
+# GUIDs used by validation
+$Sub_Processor     = '54533251-82be-4824-96c1-47b60b740d00'
+$Set_MaxProc       = 'bc5038f7-23e0-4960-96da-33abaf5935ec'
+$Set_CoolingPolicy = '94d3a615-a899-4ac5-ae2b-e4d8f634367f'
+
+# Defaults for expected resolved state
+$RequiredMax = 90   # percent
+$RequiredCoolingAC = 0  # Active
+
+$activeGuid = ""
+$maxVals = @{ AC = -1; DC = -1 }
+$coolVals = @{ AC = -1; DC = -1 }
+$pass = $false
+$notes = ""
+
+try {
+    $activeGuid = Get-ActiveSchemeGuid
+    $maxVals = Get-SettingIndices -SchemeGuid $activeGuid -SubGuid $Sub_Processor -SettingGuid $Set_MaxProc
+    $coolVals = Get-SettingIndices -SchemeGuid $activeGuid -SubGuid $Sub_Processor -SettingGuid $Set_CoolingPolicy
+
+    $pass = ($maxVals.AC -ge $RequiredMax -and $maxVals.DC -ge $RequiredMax -and $coolVals.AC -eq $RequiredCoolingAC)
+    if ($pass) {
+        $notes = "Resolved: Max processor state AC/DC >= $RequiredMax and AC cooling policy Active (0)."
+    } else {
+        $notes = "Not resolved: Expect MaxProc AC/DC >= $RequiredMax and AC cooling policy = 0 (Active)."
+    }
+}
+catch {
+    $pass = $false
+    $notes = "ValidationError: " + $_.Exception.Message
+}
+
+$result = [ordered]@{
+    pass = $pass
+    measured_values = [ordered]@{
+        active_scheme_guid = $activeGuid
+        max_processor_state_ac_percent = [int]$maxVals.AC
+        max_processor_state_dc_percent = [int]$maxVals.DC
+        system_cooling_policy_ac = [int]$coolVals.AC
+        system_cooling_policy_dc = [int]$coolVals.DC
+    }
+    notes = $notes
+}
+
+$result | ConvertTo-Json -Depth 4
