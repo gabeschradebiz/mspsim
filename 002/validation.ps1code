@@ -1,51 +1,68 @@
 param(
     [Parameter(Mandatory=$false)]
     [ValidatePattern('^[A-Za-z]$')]
-    [string]$drive_letter = 'X',
-
-    [Parameter(Mandatory=$false)]
-    [string]$bad_unc = '\\203.0.113.10\share'
+    [string]$drive_letter
 )
 
 $ErrorActionPreference = 'Stop'
 try {
-    $offenders = @()
-    $hkuRoot = 'Registry::HKEY_USERS'
+    $baseKey = 'HKLM:\SOFTWARE\CloudLabs\HelpdeskSim\BadMapping'
+    $storedDrive = (Get-ItemProperty -Path $baseKey -Name 'DriveLetter' -ErrorAction SilentlyContinue).DriveLetter
+    if ([string]::IsNullOrWhiteSpace($drive_letter)) { $drive_letter = if ($storedDrive) { $storedDrive } else { 'X' } }
+    $drive_letter = $drive_letter.ToUpper()
 
-    $sidKeys = Get-ChildItem -Path $hkuRoot -ErrorAction SilentlyContinue | Where-Object {
-        ($_ -ne $null) -and ($_.Name -match 'S-1-5-21-')
-    }
-
-    foreach ($sidKey in $sidKeys) {
-        $sid = Split-Path $sidKey.Name -Leaf
-        $networkKey = Join-Path -Path "Registry::HKEY_USERS\$sid" -ChildPath ("Network\" + $drive_letter.ToUpper())
-        if (Test-Path -Path $networkKey) {
-            $props = Get-ItemProperty -Path $networkKey -ErrorAction SilentlyContinue
-            $remotePath = $props.RemotePath
-            if ($remotePath) {
-                if ($remotePath.Trim().ToLower() -eq $bad_unc.Trim().ToLower()) {
-                    $offenders += @{ hive = $sid; remote_path = $remotePath }
-                }
+    $bad_unc = (Get-ItemProperty -Path $baseKey -Name 'BadUNC' -ErrorAction SilentlyContinue).BadUNC
+    if (-not $bad_unc) {
+        # Best-effort fallback: try to read any current RemotePath for this drive
+        $bad_unc = ''
+        $sidKeys = Get-ChildItem -Path Registry::HKEY_USERS -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'S-1-5-21-' }
+        foreach ($sidKey in $sidKeys) {
+            $sid = Split-Path $sidKey.Name -Leaf
+            $networkKey = "Registry::HKEY_USERS\$sid\Network\$drive_letter"
+            if (Test-Path $networkKey) {
+                $rp = (Get-ItemProperty -Path $networkKey -ErrorAction SilentlyContinue).RemotePath
+                if ($rp) { $bad_unc = $rp; break }
             }
         }
     }
 
-    $pass = ($offenders.Count -eq 0)
-    $notes = if ($pass) {
-        "Validation passed: no mapped drive '$($drive_letter):' to $bad_unc detected in any loaded user hive."
-    } else {
-        "Validation failed: found $($offenders.Count) mapping(s) to $bad_unc on drive '$($drive_letter):'."
+    $offenders = @()
+    $sidKeys = Get-ChildItem -Path Registry::HKEY_USERS -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'S-1-5-21-' }
+    foreach ($sidKey in $sidKeys) {
+        $sid = Split-Path $sidKey.Name -Leaf
+        $networkKey = "Registry::HKEY_USERS\$sid\Network\$drive_letter"
+        if (Test-Path $networkKey) {
+            $rp = (Get-ItemProperty -Path $networkKey -ErrorAction SilentlyContinue).RemotePath
+            if ($rp -and $bad_unc -and ($rp.Trim().ToLower() -eq $bad_unc.Trim().ToLower())) {
+                $offenders += @{ hive = $sid; remote_path = $rp }
+            }
+        }
     }
+
+    $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    $valueName = "BadMap_$drive_letter"
+    $run_value_present = $false
+    try {
+        $null = Get-ItemProperty -Path $runKey -Name $valueName -ErrorAction Stop
+        $run_value_present = $true
+    } catch { $run_value_present = $false }
+
+    $pass = (($offenders.Count -eq 0) -and (-not $run_value_present))
 
     $output = @{
         pass = $pass
         measured_values = @{
-            drive_letter = $drive_letter.ToUpper()
-            bad_unc = $bad_unc
+            drive_letter = $drive_letter
+            bad_unc = [string]$bad_unc
             found_mappings = [int]$offenders.Count
+            run_value_present = [bool]$run_value_present
             details = @()
         }
-        notes = $notes
+        notes = if ($pass) {
+            "Validation passed: no '$drive_letter:' mapping to target UNC and autorun entry removed."
+        } else {
+            "Validation failed: mappings or autorun remain."
+        }
     }
 
     foreach ($o in $offenders) {
@@ -63,9 +80,10 @@ catch {
     $fail = @{
         pass = $false
         measured_values = @{
-            drive_letter = $drive_letter.ToUpper()
-            bad_unc = $bad_unc
+            drive_letter = if ($drive_letter) { $drive_letter } else { '' }
+            bad_unc = ''
             found_mappings = 0
+            run_value_present = $false
             details = @()
         }
         notes = "Validation error: $($_.Exception.Message)"
