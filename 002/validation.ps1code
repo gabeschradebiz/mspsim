@@ -1,0 +1,75 @@
+param(
+    [Parameter(Mandatory=$false)]
+    [ValidatePattern('^[A-Za-z]$')]
+    [string]$drive_letter = 'X',
+
+    [Parameter(Mandatory=$false)]
+    [string]$bad_unc = '\\203.0.113.10\share'
+)
+
+$ErrorActionPreference = 'Stop'
+try {
+    $offenders = @()
+    $hkuRoot = 'Registry::HKEY_USERS'
+
+    $sidKeys = Get-ChildItem -Path $hkuRoot -ErrorAction SilentlyContinue | Where-Object {
+        ($_ -ne $null) -and ($_.Name -match 'S-1-5-21-')
+    }
+
+    foreach ($sidKey in $sidKeys) {
+        $sid = Split-Path $sidKey.Name -Leaf
+        $networkKey = Join-Path -Path "Registry::HKEY_USERS\$sid" -ChildPath ("Network\" + $drive_letter.ToUpper())
+        if (Test-Path -Path $networkKey) {
+            $props = Get-ItemProperty -Path $networkKey -ErrorAction SilentlyContinue
+            $remotePath = $props.RemotePath
+            if ($remotePath) {
+                if ($remotePath.Trim().ToLower() -eq $bad_unc.Trim().ToLower()) {
+                    $offenders += @{ hive = $sid; remote_path = $remotePath }
+                }
+            }
+        }
+    }
+
+    $pass = ($offenders.Count -eq 0)
+    $notes = if ($pass) {
+        "Validation passed: no mapped drive '$($drive_letter):' to $bad_unc detected in any loaded user hive."
+    } else {
+        "Validation failed: found $($offenders.Count) mapping(s) to $bad_unc on drive '$($drive_letter):'."
+    }
+
+    $output = @{
+        pass = $pass
+        measured_values = @{
+            drive_letter = $drive_letter.ToUpper()
+            bad_unc = $bad_unc
+            found_mappings = [int]$offenders.Count
+            details = @()
+        }
+        notes = $notes
+    }
+
+    foreach ($o in $offenders) {
+        $output.measured_values.details += @{
+            hive = [string]$o.hive
+            remote_path = [string]$o.remote_path
+        }
+    }
+
+    $json = $output | ConvertTo-Json -Depth 6 -Compress
+    [Console]::Out.WriteLine($json)
+    exit 0
+}
+catch {
+    $fail = @{
+        pass = $false
+        measured_values = @{
+            drive_letter = $drive_letter.ToUpper()
+            bad_unc = $bad_unc
+            found_mappings = 0
+            details = @()
+        }
+        notes = "Validation error: $($_.Exception.Message)"
+    } | ConvertTo-Json -Depth 6 -Compress
+    [Console]::Out.WriteLine($fail)
+    exit 0
+}
