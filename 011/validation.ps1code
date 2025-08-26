@@ -1,0 +1,38 @@
+[CmdletBinding()]
+param(
+  [string]$UserSamAccountName = 'labuser1'
+)
+$ErrorActionPreference = 'Stop'
+Import-Module ActiveDirectory -ErrorAction SilentlyContinue | Out-Null
+
+$now = (Get-Date).ToUniversalTime()
+$measured = [ordered]@{
+  account_exists = $false
+  enabled = $false
+  is_expired = $true
+  accountExpirationDate_utc = $null
+  user_dn = $null
+  now_utc = $now.ToString('o')
+}
+try {
+  $u = Get-ADUser -Identity $UserSamAccountName -Properties AccountExpirationDate,Enabled -ErrorAction Stop
+  $measured.account_exists = $true
+  $measured.enabled = [bool]$u.Enabled
+  if ($u.DistinguishedName) { $measured.user_dn = $u.DistinguishedName }
+  $exp = $u.AccountExpirationDate
+  if ($exp) { $measured.accountExpirationDate_utc = $exp.ToUniversalTime().ToString('o') } else { $measured.accountExpirationDate_utc = $null }
+  $isExpired = $false
+  if ($exp) { if ($exp -le (Get-Date)) { $isExpired = $true } }
+  $measured.is_expired = $isExpired
+  $pass = $measured.account_exists -and $measured.enabled -and -not $measured.is_expired
+  $notes = if ($pass) { "Account is enabled and not expired." } elseif (-not $measured.account_exists) { "Account not found." } elseif (-not $measured.enabled) { "Account disabled." } elseif ($measured.is_expired) { "AccountExpirationDate is in the past." } else { "Unknown state." }
+} catch {
+  $pass = $false
+  $notes = "Validation error: " + $_.Exception.Message
+}
+$result = [ordered]@{
+  pass = [bool]$pass
+  measured_values = $measured
+  notes = $notes
+}
+$result | ConvertTo-Json -Compress -Depth 5
