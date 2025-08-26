@@ -1,0 +1,78 @@
+param(
+    [string]$UserSamAccountName = 'locked.user',
+    [string]$UserDisplayName = 'Locked User',
+    [string]$UserPassword = 'P@ssw0rd!1',
+    [int]$LockoutThreshold = 3,
+    [int]$LockoutDurationMinutes = 30,
+    [int]$LockoutWindowMinutes = 30,
+    [int]$TriggerBadAttempts = 5
+)
+$ErrorActionPreference = 'Stop'
+function Fail($m){ Write-Error $m; exit 1 }
+try { Import-Module ActiveDirectory -ErrorAction Stop } catch { Fail "ActiveDirectory module not found" }
+try {
+    $domain = Get-ADDomain
+    $domainDN = $domain.DistinguishedName
+    $dnsRoot = $domain.DnsRoot
+    $netbios = $domain.NetBIOSName
+
+    # Ensure domain lockout policy (deterministic)
+    Set-ADDefaultDomainPasswordPolicy -Identity $domainDN `
+        -LockoutThreshold $LockoutThreshold `
+        -LockoutDuration (New-TimeSpan -Minutes $LockoutDurationMinutes) `
+        -LockoutObservationWindow (New-TimeSpan -Minutes $LockoutWindowMinutes) | Out-Null
+
+    # Ensure user exists with known password and is enabled
+    $u = Get-ADUser -Filter "SamAccountName -eq '$UserSamAccountName'" -ErrorAction SilentlyContinue
+    $sec = ConvertTo-SecureString $UserPassword -AsPlainText -Force
+    if(-not $u){
+        New-ADUser -Name $UserDisplayName `
+            -DisplayName $UserDisplayName `
+            -GivenName ($UserDisplayName.Split(' ')[0]) `
+            -Surname (($UserDisplayName.Split(' ') | Select-Object -Last 1)) `
+            -SamAccountName $UserSamAccountName `
+            -UserPrincipalName "$UserSamAccountName@$dnsRoot" `
+            -AccountPassword $sec -Enabled $true `
+            -ChangePasswordAtLogon $false -PasswordNeverExpires $true `
+            -Path ("CN=Users," + $domainDN) | Out-Null
+    } else {
+        Set-ADAccountPassword -Identity $u.DistinguishedName -Reset -NewPassword $sec
+        Enable-ADAccount -Identity $u.DistinguishedName -ErrorAction SilentlyContinue
+    }
+
+    # Start from an unlocked state (idempotent)
+    try { Unlock-ADAccount -Identity $UserSamAccountName -ErrorAction SilentlyContinue } catch {}
+
+    # Trigger bad password attempts via LDAP bind to lock the account
+    $dcHost = (Get-ADDomainController -Discover -Service "PrimaryDC" -ErrorAction SilentlyContinue).HostName
+    if(-not $dcHost){ $dcHost = (Get-ADDomainController -Discover).HostName }
+    if(-not $dcHost){ Fail "Unable to discover a domain controller host" }
+
+    $identifier = New-Object System.DirectoryServices.Protocols.LdapDirectoryIdentifier($dcHost,389)
+    $wrongPwd = 'WrongPwd!123'
+    $cred = New-Object System.Net.NetworkCredential($UserSamAccountName,$wrongPwd,$netbios)
+    $attempts = [Math]::Max($TriggerBadAttempts, $LockoutThreshold + 1)
+    for($i=0; $i -lt $attempts; $i++){
+        try{
+            $conn = New-Object System.DirectoryServices.Protocols.LdapConnection($identifier)
+            $conn.AuthType = [System.DirectoryServices.Protocols.AuthType]::Negotiate
+            $conn.SessionOptions.Sealing = $true
+            $conn.SessionOptions.Signing = $true
+            $conn.Bind($cred)
+        } catch {
+            # expected invalid credentials
+        } finally {
+            if($conn){ $conn.Dispose() }
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    Start-Sleep -Seconds 2
+    $locked = (Get-ADUser -Identity $UserSamAccountName -Properties LockedOut).LockedOut
+    if(-not $locked){ Fail "Failed to lock account" }
+    Write-Output "locked_user=$UserSamAccountName"
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
