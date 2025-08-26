@@ -1,0 +1,63 @@
+Param(
+    [string]$AdapterName = "",
+    [string]$AdapterSelectionRegex = "^(Ethernet|Ethernet \d+|Ethernet0)$"
+)
+$ErrorActionPreference = "Stop"
+function Fail($msg){ Write-Error $msg; exit 2 }
+# Require admin
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if(-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)){ Fail "Admin rights required." }
+# Find target adapter
+$adapter = $null
+if($AdapterName){
+    $adapter = Get-NetAdapter -Name $AdapterName -ErrorAction SilentlyContinue
+}else{
+    $adapter = Get-NetAdapter | Where-Object { $_.Name -match $AdapterSelectionRegex } | Sort-Object ifIndex | Select-Object -First 1
+    if(-not $adapter){
+        $adapter = Get-NetAdapter | Where-Object { $_.Status -ne 'Disabled' } | Sort-Object ifIndex | Select-Object -First 1
+    }
+}
+if(-not $adapter){ Fail "No suitable adapter found." }
+$ifIndex = $adapter.ifIndex
+# Get current IPv4 to pin as static (to keep RDP reachable)
+$ipconf = Get-NetIPConfiguration -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
+$ipv4 = $ipconf.IPv4Address | Select-Object -First 1
+if(-not $ipv4){ Fail "No IPv4 address found on adapter $($adapter.Name)." }
+$ip = $ipv4.IPAddress
+$prefix = [int]$ipv4.PrefixLength
+# Convert prefix to subnet mask for netsh
+function Get-SubnetMaskFromPrefix([int]$p){
+    $bits = ("1"* $p).PadRight(32,"0")
+    $octets = ($bits -split '(.{8})' | Where-Object {$_}) | ForEach-Object {[Convert]::ToInt32($_,2)}
+    return ($octets -join '.')
+}
+$mask = Get-SubnetMaskFromPrefix $prefix
+# Disable DHCP for IPv4 and remove default route(s)
+try{
+    Set-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 -Dhcp Disabled -ErrorAction SilentlyContinue | Out-Null
+}catch{}
+try{
+    Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue | Remove-NetRoute -Confirm:$false -ErrorAction SilentlyContinue
+}catch{}
+# Force static address (no gateway) and poison DNS to loopback
+try{
+    & netsh interface ip set address name="$($adapter.Name)" static $ip $mask none | Out-Null
+}catch{
+    # If static already set with a gateway, reset to none
+    try{ & netsh interface ip set address name="$($adapter.Name)" static $ip $mask none | Out-Null }catch{ }
+}
+try{
+    & netsh interface ip set dns name="$($adapter.Name)" static 127.0.0.1 | Out-Null
+}catch{
+    Set-DnsClientServerAddress -InterfaceIndex $ifIndex -ServerAddresses 127.0.0.1 -ErrorAction SilentlyContinue | Out-Null
+}
+# Minimal ensure-broken checks
+$ipIf = Get-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+$routes = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+$dns = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+if($ipIf -and $ipIf.Dhcp -eq "Disabled" -and (-not $routes) -and $dns -and ($dns -contains "127.0.0.1")){
+    Write-Output "broken_state_applied:1"
+    exit 0
+}else{
+    Fail "Failed to enforce static/no-gateway/loopback-DNS state."
+}
