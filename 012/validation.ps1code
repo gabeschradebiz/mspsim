@@ -1,0 +1,80 @@
+Param(
+    [string]$adapter_name = ""
+)
+$ErrorActionPreference = "Stop"
+function OutJson($obj){
+    $json = $obj | ConvertTo-Json -Depth 6 -Compress
+    [Console]::Out.WriteLine($json)
+}
+# Select adapter
+$adapter = $null
+if($adapter_name){
+    $adapter = Get-NetAdapter -Name $adapter_name -ErrorAction SilentlyContinue
+}else{
+    $adapter = Get-NetAdapter | Where-Object { $_.Name -match '^(Ethernet|Ethernet \d+|Ethernet0)$' } | Sort-Object ifIndex | Select-Object -First 1
+    if(-not $adapter){
+        $adapter = Get-NetAdapter | Where-Object { $_.Status -ne 'Disabled' } | Sort-Object ifIndex | Select-Object -First 1
+    }
+}
+if(-not $adapter){
+    OutJson @{
+        pass = $false
+        measured_values = @{
+            adapter_name    = ""
+            status          = "Unknown"
+            dhcp_enabled    = $false
+            ipv4            = ""
+            default_gateway = ""
+            dns_servers     = @()
+            media_connected = $false
+        }
+        notes = "No suitable network adapter found."
+        timestamp_utc = ([DateTime]::UtcNow.ToString("o"))
+    }
+    exit 0
+}
+$ifIndex = $adapter.ifIndex
+$ipIf = Get-NetIPInterface -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+$ipconf = Get-NetIPConfiguration -InterfaceIndex $ifIndex -ErrorAction SilentlyContinue
+$routes = Get-NetRoute -InterfaceIndex $ifIndex -DestinationPrefix "0.0.0.0/0" -ErrorAction SilentlyContinue
+$dnsServers = @()
+try{
+    $dnsServers = (Get-DnsClientServerAddress -InterfaceIndex $ifIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue).ServerAddresses
+}catch{ $dnsServers = @() }
+$ipv4 = ""
+if($ipconf.IPv4Address){ $ipv4 = ($ipconf.IPv4Address | Select-Object -First 1).IPAddress } else { $ipv4 = "" }
+$gateway = ""
+if($ipconf.IPv4DefaultGateway){ $gateway = $ipconf.IPv4DefaultGateway.NextHop } else { $gateway = "" }
+$dhcpEnabled = $false
+if($ipIf){ $dhcpEnabled = ($ipIf.Dhcp -eq "Enabled") }
+$mediaConnected = $false
+try{
+    $mediaConnected = ($adapter.MediaConnectionState -eq "Connected") -or ($adapter.Status -eq "Up")
+}catch{
+    $mediaConnected = ($adapter.Status -eq "Up")
+}
+$dnsOk = ($dnsServers -and ($dnsServers | Where-Object { $_ -in @("127.0.0.1","0.0.0.0") }) -eq $null)
+$hasDefaultRoute = ($routes -ne $null -and $routes.Count -gt 0)
+$ipv4Ok = ($ipv4 -and ($ipv4 -notmatch '^169\.254\.'))
+$pass = $dhcpEnabled -and $hasDefaultRoute -and $dnsOk -and $ipv4Ok -and $mediaConnected
+$failReasons = @()
+if(-not $dhcpEnabled){ $failReasons += "IPv4 DHCP is disabled" }
+if(-not $hasDefaultRoute){ $failReasons += "No default gateway route" }
+if(-not $dnsOk){ $failReasons += "DNS servers include loopback/invalid entries" }
+if(-not $ipv4Ok){ $failReasons += "IPv4 missing or APIPA" }
+if(-not $mediaConnected){ $failReasons += "Adapter not connected/up" }
+$notes = if($pass){ "NIC is up with DHCP enabled, default gateway present, non-APIPA IPv4, and valid DNS servers." } else { "Failed checks: " + ($failReasons -join "; ") }
+OutJson @{
+    pass = $pass
+    measured_values = @{
+        adapter_name    = $adapter.Name
+        status          = $adapter.Status
+        dhcp_enabled    = $dhcpEnabled
+        ipv4            = $ipv4
+        default_gateway = $gateway
+        dns_servers     = $dnsServers
+        media_connected = $mediaConnected
+    }
+    notes = $notes
+    timestamp_utc = ([DateTime]::UtcNow.ToString("o"))
+}
