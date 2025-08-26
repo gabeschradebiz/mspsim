@@ -1,0 +1,82 @@
+[CmdletBinding()]
+param(
+    [Parameter()][string]$domain_name = $null,
+    [Parameter()][string]$broken_dns_ipv4 = '203.0.113.1',
+    [Parameter()][string]$adapter_alias = $null
+)
+
+$ErrorActionPreference = 'SilentlyContinue'
+
+function Get-ActiveAdapter {
+    param([string]$alias)
+    if ($alias) {
+        try { return Get-NetAdapter -Name $alias -ErrorAction Stop } catch { return $null }
+    }
+    $a = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+        Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -notmatch '^vEthernet' } |
+        Sort-Object ifIndex | Select-Object -First 1
+    if (-not $a) {
+        $a = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } |
+            Sort-Object ifIndex | Select-Object -First 1
+    }
+    return $a
+}
+
+# Determine domain
+try {
+    if (-not $domain_name -or $domain_name -eq '') {
+        $cs = Get-CimInstance -ClassName Win32_ComputerSystem
+        $domain_name = $cs.Domain
+    }
+} catch {}
+
+$adapter = Get-ActiveAdapter -alias $adapter_alias
+$adapterName = if ($adapter) { $adapter.Name } else { "" }
+
+$dnsServers = @()
+try {
+    if ($adapter) {
+        $dnsServers = (Get-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -AddressFamily IPv4).ServerAddresses
+    }
+} catch {}
+
+# Check DC discovery
+$dsExit = -1
+$dsOk = $false
+if ($domain_name) {
+    try {
+        & nltest.exe "/dsgetdc:$domain_name" | Out-Null
+        $dsExit = $LASTEXITCODE
+        $dsOk = ($dsExit -eq 0)
+    } catch {
+        $dsExit = -1
+        $dsOk = $false
+    }
+}
+
+# Check machine secure channel
+$secure = $false
+try { $secure = Test-ComputerSecureChannel -Quiet } catch { $secure = $false }
+
+$dnsOk = ($dnsServers.Count -gt 0 -and ($dnsServers -notcontains $broken_dns_ipv4))
+$pass = [bool]($dnsOk -and $dsOk -and $secure)
+
+$notes = if ($pass) {
+    "Pass: DC discoverable, machine secure channel healthy, and client DNS no longer set to the bad server."
+} else {
+    "Fail: One or more checks failed (dnsOk=$dnsOk, dsgetdcExit=$dsExit, secureChannel=$secure). Ensure client DNS points to the domain DNS and retry."
+}
+
+$result = [ordered]@{
+    pass = $pass
+    measured_values = [ordered]@{
+        domain = ($domain_name | ToString)
+        adapter = $adapterName
+        dns_servers = $dnsServers
+        secure_channel = $secure
+        dsgetdc_exitcode = $dsExit
+    }
+    notes = $notes
+}
+
+$result | ConvertTo-Json -Depth 5
