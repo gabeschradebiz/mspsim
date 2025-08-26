@@ -1,0 +1,47 @@
+param(
+    [string]$task_name = "CL_DefenderScanLoop",
+    [string]$script_path = "C:\ProgramData\CloudLabs\DefenderScanLoop.ps1"
+)
+$ErrorActionPreference = "Stop"
+function Fail($m){ Write-Error $m; exit 1 }
+try {
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if(-not $isAdmin){ Fail "admin_required" }
+
+    $dir = Split-Path -Parent $script_path
+    if(-not (Test-Path -Path $dir)){ New-Item -Path $dir -ItemType Directory -Force | Out-Null }
+
+    $scriptContent = @"
+`$ErrorActionPreference = 'SilentlyContinue'
+while (`$true) {
+    try {
+        `$cmd = Get-Command -Name Start-MpScan -ErrorAction SilentlyContinue
+        if (`$null -ne `$cmd) {
+            `$status = Get-MpComputerStatus
+            if (-not `$status.AntivirusScanInProgress) {
+                Start-MpScan -ScanType Full | Out-Null
+            }
+        }
+    } catch {}
+    Start-Sleep -Seconds 5
+}
+"@
+    Set-Content -Path $script_path -Value $scriptContent -Encoding UTF8 -Force
+    Unblock-File -Path $script_path -ErrorAction SilentlyContinue
+
+    $taskPath = "\CloudLabs"
+    $action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$script_path`""
+    $trigger = New-ScheduledTaskTrigger -AtStartup
+    $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -RunLevel Highest -LogonType ServiceAccount
+
+    Register-ScheduledTask -TaskName $task_name -TaskPath $taskPath -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+
+    Start-ScheduledTask -TaskName $task_name -TaskPath $taskPath -ErrorAction SilentlyContinue | Out-Null
+
+    Write-Output "task_configured=$task_name"
+    exit 0
+}
+catch {
+    Write-Error ($_.Exception.Message)
+    exit 1
+}
