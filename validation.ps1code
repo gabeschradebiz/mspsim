@@ -1,0 +1,15 @@
+param(
+    [string]$task_name = "CL_DefenderScanLoop",
+    [string]$script_path = "C:\ProgramData\CloudLabs\DefenderScanLoop.ps1",
+    [int]$cpu_threshold_percent = 30,
+    [int]$sample_seconds = 30,
+    [int]$sample_interval_seconds = 3
+)
+$ErrorActionPreference = "SilentlyContinue"
+
+function Safe-GetMpStatus {
+    try {
+        $s = Get-MpComputerStatus
+        return [bool]$s.AntivirusScanInProgress
+    } catch { return $false }
+}
