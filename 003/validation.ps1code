@@ -1,0 +1,77 @@
+param(
+    [string]$task_name = "CL_DefenderScanLoop",
+    [string]$script_path = "C:\ProgramData\CloudLabs\DefenderScanLoop.ps1",
+    [int]$cpu_threshold_percent = 30,
+    [int]$sample_seconds = 30,
+    [int]$sample_interval_seconds = 3
+)
+$ErrorActionPreference = "SilentlyContinue"
+
+function Safe-GetMpStatus {
+    try {
+        $s = Get-MpComputerStatus
+        return [bool]$s.AntivirusScanInProgress
+    } catch { return $false }
+}
+
+# Detect scheduled task
+$taskObj = $null
+try {
+    $taskObj = Get-ScheduledTask -TaskName $task_name -TaskPath "\CloudLabs\" -ErrorAction Stop
+} catch {
+    try { $taskObj = Get-ScheduledTask -TaskName $task_name -ErrorAction Stop } catch { $taskObj = $null }
+}
+$taskExists = $null -ne $taskObj
+$taskEnabled = $null
+if ($taskExists) { $taskEnabled = [bool]$taskObj.Settings.Enabled }
+
+# Detect loop process by command line (script path)
+$loopProcessRunning = $false
+try {
+    $procs = Get-CimInstance Win32_Process -ErrorAction Stop | Where-Object {
+        $_.Name -match 'powershell' -and $_.CommandLine -match [Regex]::Escape($script_path)
+    }
+    $loopProcessRunning = ($procs | Measure-Object).Count -gt 0
+} catch { $loopProcessRunning = $false }
+
+# Defender scan status
+$scanInProgress = Safe-GetMpStatus
+
+# Sample MsMpEng CPU
+$samples = @()
+$end = (Get-Date).AddSeconds([math]::Max(3,$sample_seconds))
+while ((Get-Date) -lt $end) {
+    try {
+        $v = (Get-Counter -Counter '\Process(MsMpEng)\% Processor Time' -ErrorAction Stop).CounterSamples[0].CookedValue
+        if ($null -eq $v) { $v = 0 }
+        $samples += [math]::Round([double]$v,2)
+    } catch { $samples += 0 }
+    Start-Sleep -Seconds ([math]::Max(1,$sample_interval_seconds))
+}
+$avgCpu = 0
+if ($samples.Count -gt 0) { $avgCpu = [math]::Round((($samples | Measure-Object -Average).Average),2) }
+
+# Pass criteria: task removed or disabled AND loop script not running AND scan not in progress
+$pass = ((-not $taskExists) -or (-not $taskEnabled)) -and (-not $loopProcessRunning) -and (-not $scanInProgress)
+
+$notes = if ($pass) {
+    "Validation passed: Defender scan loop disabled/removed and no active scan. MsMpEng avg CPU=${avgCpu}% over ${sample_seconds}s."
+} else {
+    "Validation failed: taskExists=$taskExists taskEnabled=$taskEnabled loopProcessRunning=$loopProcessRunning scanInProgress=$scanInProgress MsMpEng avg CPU=${avgCpu}% over ${sample_seconds}s."
+}
+
+$result = [pscustomobject]@{
+    pass = $pass
+    measured_values = [pscustomobject]@{
+        task_exists = $taskExists
+        task_enabled = $taskEnabled
+        loop_process_running = $loopProcessRunning
+        defender_scan_in_progress = $scanInProgress
+        msmpeng_avg_cpu_percent = $avgCpu
+        cpu_samples = $samples
+        sampling_seconds = [int]$sample_seconds
+    }
+    notes = $notes
+}
+
+$result | ConvertTo-Json -Depth 5
