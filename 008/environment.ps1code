@@ -1,0 +1,39 @@
+$ErrorActionPreference = 'Stop'
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+
+    $userSam = 'cl_enduser1'
+    $displayName = 'CL EndUser1'
+    $stateDir = 'C:\ProgramData\CloudLabs\Scenarios\ForgottenPassword'
+    New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
+
+    $existing = Get-ADUser -Filter "SamAccountName -eq '$userSam'" -ErrorAction SilentlyContinue
+    if (-not $existing) {
+        $domainDN = (Get-ADDomain).DistinguishedName
+        $defaultUsersCN = "CN=Users,$domainDN"
+        New-ADUser -SamAccountName $userSam -Name $displayName -DisplayName $displayName -Path $defaultUsersCN -Enabled $true -AccountPassword (ConvertTo-SecureString 'Temp#DontUse123!' -AsPlainText -Force)
+    } else {
+        Enable-ADAccount -Identity $userSam -ErrorAction SilentlyContinue
+    }
+
+    $brokenPwd = ConvertTo-SecureString 'Broken#Password1!' -AsPlainText -Force
+    Set-ADAccountPassword -Identity $userSam -Reset -NewPassword $brokenPwd
+    Set-ADUser -Identity $userSam -ChangePasswordAtLogon $false -PasswordNeverExpires $false
+    Unlock-ADAccount -Identity $userSam -ErrorAction SilentlyContinue
+
+    $u = Get-ADUser -Identity $userSam -Properties PasswordLastSet,LockedOut,Enabled
+    $baseline = if ($u.PasswordLastSet) { $u.PasswordLastSet.ToString('o') } else { '' }
+
+    $state = [pscustomobject]@{
+        user_sam                   = $userSam
+        baseline_passwordlastset   = $baseline
+        injected_at                = (Get-Date).ToString('o')
+    }
+    $state | ConvertTo-Json -Depth 5 | Set-Content -Path (Join-Path $stateDir 'state.json') -Encoding UTF8
+
+    Write-Output "injected:$stateDir\state.json"
+    exit 0
+} catch {
+    Write-Error ($_.Exception.Message)
+    exit 1
+}
