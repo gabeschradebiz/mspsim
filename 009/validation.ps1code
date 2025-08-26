@@ -1,0 +1,59 @@
+$ErrorActionPreference = 'Stop'
+function Get-Dword {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('HKEY_LOCAL_MACHINE','HKEY_CURRENT_USER')]$Hive,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Name
+    )
+    try {
+        $val = (Get-ItemProperty -Path "Registry::$Hive\$Path" -Name $Name -ErrorAction Stop).$Name
+        return [int]$val
+    } catch { return $null }
+}
+try {
+    $polPath = 'SOFTWARE\Policies\Microsoft\Office\16.0\Common\Identity'
+    $cuPath  = 'Software\Microsoft\Office\16.0\Common\Identity'
+
+    $HKLM_EnableADAL      = Get-Dword -Hive 'HKEY_LOCAL_MACHINE' -Path $polPath -Name 'EnableADAL'
+    $HKLM_DisableAADWAM   = Get-Dword -Hive 'HKEY_LOCAL_MACHINE' -Path $polPath -Name 'DisableAADWAM'
+    $HKCU_EnableADAL      = Get-Dword -Hive 'HKEY_CURRENT_USER' -Path $cuPath  -Name 'EnableADAL'
+    $HKCU_DisableAADWAM   = Get-Dword -Hive 'HKEY_CURRENT_USER' -Path $cuPath  -Name 'DisableAADWAM'
+
+    $disabled = $false
+    if ($HKLM_EnableADAL -eq 0) { $disabled = $true }
+    if ($HKCU_EnableADAL -eq 0) { $disabled = $true }
+    if ($HKLM_DisableAADWAM -eq 1) { $disabled = $true }
+    if ($HKCU_DisableAADWAM -eq 1) { $disabled = $true }
+
+    $pass = -not $disabled
+
+    $notes = if ($pass) {
+        'Modern Authentication is enabled (no disabling policy keys detected).'
+    } else {
+        'Modern Authentication is disabled by one or more registry values; set EnableADAL=1 and DisableAADWAM=0 or remove them.'
+    }
+
+    $out = [ordered]@{
+        pass = $pass
+        measured_values = [ordered]@{
+            HKLM_EnableADAL = $HKLM_EnableADAL
+            HKLM_DisableAADWAM = $HKLM_DisableAADWAM
+            HKCU_EnableADAL = $HKCU_EnableADAL
+            HKCU_DisableAADWAM = $HKCU_DisableAADWAM
+        }
+        notes = $notes
+    }
+    $out | ConvertTo-Json -Compress
+} catch {
+    $out = [ordered]@{
+        pass = $false
+        measured_values = [ordered]@{
+            HKLM_EnableADAL = $null
+            HKLM_DisableAADWAM = $null
+            HKCU_EnableADAL = $null
+            HKCU_DisableAADWAM = $null
+        }
+        notes = ("Validation error: " + $_.Exception.Message)
+    }
+    $out | ConvertTo-Json -Compress
+}
