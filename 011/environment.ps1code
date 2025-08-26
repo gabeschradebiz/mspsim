@@ -1,0 +1,57 @@
+[CmdletBinding()]
+param(
+  [string]$UserSamAccountName = 'labuser1',
+  [string]$OUName = 'HelpdeskLab',
+  [string]$GivenName = 'Lab',
+  [string]$Surname = 'User',
+  [string]$InitialPassword = 'P@ssw0rd!23',
+  [int]$ExpireDaysOffset = -1
+)
+$ErrorActionPreference = 'Stop'
+try {
+  Import-Module ActiveDirectory -ErrorAction Stop
+
+  $domain = Get-ADDomain
+  if (-not $domain) { throw "Active Directory domain not detected." }
+  $domainDN = $domain.DistinguishedName
+  $dnsRoot = $domain.DNSRoot
+
+  # Ensure OU exists
+  $ouDN = "OU=$OUName,$domainDN"
+  $ou = Get-ADOrganizationalUnit -Identity $ouDN -ErrorAction SilentlyContinue
+  if (-not $ou) {
+    New-ADOrganizationalUnit -Name $OUName -Path $domainDN -ProtectedFromAccidentalDeletion:$false | Out-Null
+  }
+
+  # Ensure user exists and is enabled
+  $user = Get-ADUser -Identity $UserSamAccountName -ErrorAction SilentlyContinue
+  if (-not $user) {
+    $sec = ConvertTo-SecureString $InitialPassword -AsPlainText -Force
+    New-ADUser -Name "$GivenName $Surname" -SamAccountName $UserSamAccountName -UserPrincipalName "$UserSamAccountName@$dnsRoot" -GivenName $GivenName -Surname $Surname -Path $ouDN -AccountPassword $sec -Enabled $true -ChangePasswordAtLogon:$false -PasswordNeverExpires:$false | Out-Null
+    $user = Get-ADUser -Identity $UserSamAccountName -ErrorAction Stop
+  } else {
+    try {
+      $obj = Get-ADObject -Identity $user.DistinguishedName -Properties DistinguishedName
+      if ($obj.DistinguishedName -ne $ouDN) {
+        # Move only if not already under the OU
+        if ($user.DistinguishedName -notlike "*,$ouDN") {
+          Move-ADObject -Identity $user.DistinguishedName -TargetPath $ouDN
+        }
+      }
+    } catch { }
+    Enable-ADAccount -Identity $UserSamAccountName -ErrorAction SilentlyContinue
+  }
+
+  # Set expiration to a deterministic past date (broken state)
+  $expireDate = (Get-Date).Date.AddDays([int]$ExpireDaysOffset).AddHours(1)
+  Set-ADUser -Identity $UserSamAccountName -AccountExpirationDate $expireDate
+
+  $post = Get-ADUser -Identity $UserSamAccountName -Properties AccountExpirationDate
+  $expOut = $null
+  if ($post.AccountExpirationDate) { $expOut = $post.AccountExpirationDate.ToUniversalTime().ToString('o') } else { $expOut = 'null' }
+  Write-Output ("BROKEN_STATE_APPLIED user={0} expires_utc={1}" -f $UserSamAccountName, $expOut)
+  exit 0
+} catch {
+  Write-Error ("ERROR: {0}" -f $_.Exception.Message)
+  exit 1
+}
