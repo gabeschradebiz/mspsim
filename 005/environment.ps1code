@@ -1,0 +1,60 @@
+param(
+    [Parameter(Mandatory=$false)]
+    [bool]$RebootNow = $true
+)
+$ErrorActionPreference = 'Stop'
+function Fail($m){ Write-Error $m; exit 1 }
+try{
+    # Require admin
+    $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    if(-not $isAdmin){ Fail "admin_required" }
+
+    $mmKeyPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+    if(-not (Test-Path $mmKeyPath)){ Fail "missing_mm_registry_key" }
+
+    $needReboot = $false
+
+    # Disable automatic managed pagefile
+    $currentAuto = (Get-ItemProperty -Path $mmKeyPath -Name AutomaticManagedPagefile -ErrorAction SilentlyContinue).AutomaticManagedPagefile
+    if($null -eq $currentAuto -or $currentAuto -ne 0){
+        New-ItemProperty -Path $mmKeyPath -Name AutomaticManagedPagefile -PropertyType DWord -Value 0 -Force | Out-Null
+        $needReboot = $true
+    }
+
+    # Clear PagingFiles (REG_MULTI_SZ)
+    $currentPF = (Get-ItemProperty -Path $mmKeyPath -Name PagingFiles -ErrorAction SilentlyContinue).PagingFiles
+    $currentPFCount = 0
+    if($null -ne $currentPF){
+        if($currentPF -is [string]){ $currentPFCount = ([string]::IsNullOrEmpty($currentPF)) ? 0 : 1 }
+        elseif($currentPF -is [System.Array]){ $currentPFCount = $currentPF.Count }
+        else{ $currentPFCount = 0 }
+    }
+    if($currentPFCount -ne 0){
+        New-ItemProperty -Path $mmKeyPath -Name PagingFiles -PropertyType MultiString -Value ([string[]]@()) -Force | Out-Null
+        $needReboot = $true
+    } elseif($null -eq $currentPF){
+        New-ItemProperty -Path $mmKeyPath -Name PagingFiles -PropertyType MultiString -Value ([string[]]@()) -Force | Out-Null
+        $needReboot = $true
+    }
+
+    # Remove any explicit pagefile settings
+    $removedAny = $false
+    try{
+        $pfSettings = Get-CimInstance -ClassName Win32_PageFileSetting -ErrorAction SilentlyContinue
+        if($pfSettings){
+            foreach($s in $pfSettings){ 
+                try{ Remove-CimInstance -InputObject $s -ErrorAction Stop; $removedAny = $true }catch{}
+            }
+        }
+    }catch{}
+    if($removedAny){ $needReboot = $true }
+
+    if($RebootNow -and $needReboot){
+        Restart-Computer -Force
+    }
+
+    exit 0
+}catch{
+    Write-Error ($_.Exception.Message)
+    exit 1
+}
