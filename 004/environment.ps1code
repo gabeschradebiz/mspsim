@@ -1,0 +1,58 @@
+param(
+    [Parameter()][ValidatePattern('^[A-Za-z]$')][string]$DriveLetter = 'C',
+    [Parameter()][ValidateRange(0.05,10)][double]$TargetFreeGB = 0.2,
+    [Parameter()][string]$FolderPath = 'C:\Temp\CLABS_Fill',
+    [Parameter()][string]$FileName = 'CLABS_filler.bin'
+)
+$ErrorActionPreference = 'Stop'
+try {
+    $dl = ($DriveLetter.ToUpper() + ':')
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$dl'"
+    if (-not $disk) { throw "Drive $dl not found." }
+
+    $desiredFreeBytes = [int64]($TargetFreeGB * 1GB)
+    if (-not (Test-Path -LiteralPath $FolderPath)) {
+        New-Item -Path $FolderPath -ItemType Directory -Force | Out-Null
+    }
+    $filePath = Join-Path -Path $FolderPath -ChildPath $FileName
+    if (-not (Test-Path -LiteralPath $filePath)) {
+        New-Item -Path $filePath -ItemType File -Force | Out-Null
+    }
+
+    function Get-FreeBytes([string]$driveId) {
+        (Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$driveId'").FreeSpace
+    }
+
+    $maxLoops = 6
+    for ($i=0; $i -lt $maxLoops; $i++) {
+        $freeBytes = [int64](Get-FreeBytes $dl)
+        if ($freeBytes -le $desiredFreeBytes) { break }
+        $bytesToConsume = $freeBytes - $desiredFreeBytes
+        if ($bytesToConsume -le 0) { break }
+
+        $fs = [System.IO.File]::Open($filePath, [System.IO.FileMode]::OpenOrCreate, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+        try {
+            $currentSize = [int64]$fs.Length
+            $newSize = $currentSize + $bytesToConsume
+            # Prevent overfilling to zero bytes free; keep a small 64MB cushion
+            $cushion = [int64](64MB)
+            if ($bytesToConsume -gt $cushion) { $newSize = $newSize - $cushion }
+            if ($newSize -lt 0) { $newSize = 0 }
+            $fs.SetLength($newSize)
+        } finally {
+            $fs.Close()
+        }
+        Start-Sleep -Milliseconds 200
+    }
+
+    # Final check: ensure state is broken (free <= desired)
+    $finalFree = [int64](Get-FreeBytes $dl)
+    if ($finalFree -gt $desiredFreeBytes) {
+        throw "Failed to reduce free space to target. FreeBytes=$finalFree Desired<=$desiredFreeBytes"
+    }
+    exit 0
+}
+catch {
+    Write-Error ("CLABS_INJECT_ERROR: " + $_.Exception.Message)
+    exit 1
+}
