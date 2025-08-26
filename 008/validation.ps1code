@@ -1,0 +1,52 @@
+$ErrorActionPreference = 'Stop'
+function Out-ResultJson {
+    param(
+        [bool]$Pass,
+        [hashtable]$Measured,
+        [string]$Notes
+    )
+    $obj = [pscustomobject]@{
+        pass = $Pass
+        measured_values = [pscustomobject]$Measured
+        notes = $Notes
+    }
+    $obj | ConvertTo-Json -Depth 5
+}
+try {
+    Import-Module ActiveDirectory -ErrorAction Stop
+
+    $userSam = 'cl_enduser1'
+    $stateFile = 'C:\ProgramData\CloudLabs\Scenarios\ForgottenPassword\state.json'
+
+    if (-not (Test-Path $stateFile)) {
+        Out-ResultJson -Pass:$false -Measured:@{ user_sam=$userSam; baseline_passwordlastset=''; current_passwordlastset=''; account_enabled=$false; locked_out=$false; changed_since_injection=$false } -Notes:'State file not found; environment not initialized.'
+        exit 0
+    }
+
+    $state = Get-Content -Path $stateFile -Raw | ConvertFrom-Json
+
+    $u = Get-ADUser -Identity $userSam -Properties PasswordLastSet,LockedOut,Enabled
+    $currentPLS = if ($u.PasswordLastSet) { $u.PasswordLastSet.ToString('o') } else { '' }
+    $baselinePLS = if ($state.baseline_passwordlastset) { [string]$state.baseline_passwordlastset } else { '' }
+
+    $changed = ($currentPLS -ne $baselinePLS)
+    $pass = ($changed -and [bool]$u.Enabled)
+
+    $notes = if ($pass) { 'PasswordLastSet changed since injection and account is enabled.' } else { 'PasswordLastSet did not change or account not enabled.' }
+
+    $measured = @{
+        user_sam = $userSam
+        baseline_passwordlastset = $baselinePLS
+        current_passwordlastset = $currentPLS
+        account_enabled = [bool]$u.Enabled
+        locked_out = [bool]$u.LockedOut
+        changed_since_injection = [bool]$changed
+    }
+
+    Out-ResultJson -Pass:$pass -Measured:$measured -Notes:$notes
+    exit 0
+} catch {
+    $measured = @{ user_sam='cl_enduser1'; baseline_passwordlastset=''; current_passwordlastset=''; account_enabled=$false; locked_out=$false; changed_since_injection=$false }
+    Out-ResultJson -Pass:$false -Measured:$measured -Notes:("Validation error: " + $_.Exception.Message) | Write-Output
+    exit 0
+}
