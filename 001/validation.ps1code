@@ -1,0 +1,85 @@
+[CmdletBinding()]
+param()
+$ErrorActionPreference = 'Stop'
+function Get-RegistryValue {
+    param([string]$Path,[string]$Name)
+    try {
+        $obj = Get-ItemProperty -LiteralPath $Path -Name $Name -ErrorAction Stop
+        return $obj.$Name
+    } catch {
+        return $null
+    }
+}
+try {
+    $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    $approvedKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run'
+
+    $runNames = @()
+    if (Test-Path -LiteralPath $runKey) {
+        $props = (Get-Item -LiteralPath $runKey).Property
+        if ($props) { $runNames = $props | Where-Object { $_ -like 'CLStart_App*' } }
+    }
+    $approvedNames = @()
+    if (Test-Path -LiteralPath $approvedKey) {
+        $props2 = (Get-Item -LiteralPath $approvedKey).Property
+        if ($props2) { $approvedNames = $props2 | Where-Object { $_ -like 'CLStart_App*' } }
+    }
+
+    $allNames = @() + $runNames + $approvedNames | Select-Object -Unique
+
+    $enabledCount = 0
+    foreach ($name in $allNames) {
+        $runPresent = $false
+        if ($runNames -contains $name) { $runPresent = $true }
+        $appr = Get-RegistryValue -Path $approvedKey -Name $name
+
+        $status = 'Unknown'
+        if ($null -ne $appr -and $appr.Length -gt 0) {
+            if ($appr[0] -eq 3) { $status = 'Disabled' }
+            elseif ($appr[0] -eq 2) { $status = 'Enabled' }
+            else { $status = 'Unknown' }
+        } else {
+            # No StartupApproved value recorded
+            $status = if ($runPresent) { 'Enabled' } else { 'Disabled' }
+        }
+
+        if ($status -ne 'Disabled') { $enabledCount++ }
+    }
+
+    $total = $allNames.Count
+    $pass = ($enabledCount -eq 0)
+    $measured = [ordered]@{
+        run_entries_total      = $total
+        run_entries_enabled    = $enabledCount
+        all_disabled           = ($enabledCount -eq 0)
+        timestamp_utc          = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    $notes = if ($pass) {
+        "All CLStart_* startup entries are disabled or removed."
+    } else {
+        "There are $enabledCount enabled CLStart_* startup entries remaining."
+    }
+
+    $outObj = [ordered]@{
+        pass = $pass
+        measured_values = $measured
+        notes = $notes
+    }
+    $json = $outObj | ConvertTo-Json -Compress
+    Write-Output $json
+    exit 0
+}
+catch {
+    $outObj = [ordered]@{
+        pass = $false
+        measured_values = @{
+            run_entries_total = 0
+            run_entries_enabled = 0
+            all_disabled = $false
+            timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        notes = "validation_error: $($_.Exception.Message)"
+    }
+    Write-Output ($outObj | ConvertTo-Json -Compress)
+    exit 1
+}
