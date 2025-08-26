@@ -1,0 +1,45 @@
+param(
+    [Parameter()][ValidatePattern('^[A-Za-z]$')][string]$DriveLetter = 'C',
+    [Parameter()][ValidateRange(1,1000)][double]$MinFreeGB = 5
+)
+$ErrorActionPreference = 'Stop'
+try {
+    $dl = ($DriveLetter.ToUpper() + ':')
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$dl'"
+    if (-not $disk) { throw "Drive $dl not found." }
+    $totalGB = [math]::Round(($disk.Size/1GB),2)
+    $freeGB  = [math]::Round(($disk.FreeSpace/1GB),2)
+    $percentFree = if ($disk.Size -gt 0) { [math]::Round((($disk.FreeSpace/$disk.Size)*100),2) } else { 0 }
+    $pass = ($freeGB -ge $MinFreeGB)
+    $notes = if ($pass) {
+        "{0}: free space {1} GB >= threshold {2} GB" -f $dl, $freeGB, $MinFreeGB
+    } else {
+        "{0}: free space {1} GB < threshold {2} GB" -f $dl, $freeGB, $MinFreeGB
+    }
+    $out = [ordered]@{
+        pass = $pass
+        measured_values = @{
+            drive_letter = $DriveLetter.ToUpper()
+            total_gb = $totalGB
+            free_gb = $freeGB
+            percent_free = $percentFree
+            threshold_gb = [math]::Round($MinFreeGB,2)
+        }
+        notes = $notes
+    }
+    $out | ConvertTo-Json -Depth 5 -Compress
+}
+catch {
+    $out = [ordered]@{
+        pass = $false
+        measured_values = @{
+            drive_letter = $DriveLetter.ToUpper()
+            total_gb = 0
+            free_gb = 0
+            percent_free = 0
+            threshold_gb = [math]::Round($MinFreeGB,2)
+        }
+        notes = ("Validation error: " + $_.Exception.Message)
+    }
+    $out | ConvertTo-Json -Depth 5 -Compress
+}
