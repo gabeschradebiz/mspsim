@@ -1,0 +1,33 @@
+[CmdletBinding()]
+param(
+    [Parameter()][string]$broken_dns_ipv4 = '203.0.113.1',
+    [Parameter()][string]$adapter_alias = $null
+)
+try {
+    $ErrorActionPreference = 'Stop'
+
+    # Select adapter
+    $adapter = $null
+    if ($adapter_alias) {
+        $adapter = Get-NetAdapter -Name $adapter_alias -ErrorAction Stop
+    } else {
+        $adapter = Get-NetAdapter -Physical -ErrorAction SilentlyContinue |
+            Where-Object { $_.Status -eq 'Up' -and $_.HardwareInterface -eq $true -and $_.Name -notmatch '^vEthernet' } |
+            Sort-Object ifIndex | Select-Object -First 1
+        if (-not $adapter) {
+            $adapter = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' } |
+                Sort-Object ifIndex | Select-Object -First 1
+        }
+    }
+    if (-not $adapter) { Write-Error 'no_up_adapter_found'; exit 2 }
+
+    # Apply broken DNS configuration (idempotent)
+    Set-DnsClientServerAddress -InterfaceIndex $adapter.InterfaceIndex -ServerAddresses $broken_dns_ipv4 -ErrorAction Stop
+    Clear-DnsClientCache
+
+    Write-Output ("broken_state_applied=true adapter='{0}' dns='{1}'" -f $adapter.Name, $broken_dns_ipv4)
+    exit 0
+} catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
