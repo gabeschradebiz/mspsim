@@ -1,18 +1,31 @@
 $ErrorActionPreference = 'Stop'
 try {
     $driveLetter = 'X'
-    $badUNC = '\\203.0.113.10\share'
-    $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
-    $valueName = "BadMap_$driveLetter"
-    $dl = "$driveLetter`:"
-    $cmd = "cmd.exe /c net use $dl /delete /y 2>nul & net use $dl $badUNC /persistent:yes"
+    $baseKey = 'HKLM:\SOFTWARE\CloudLabs\HelpdeskSim\BadMapping'
+    if (-not (Test-Path $baseKey)) {
+        New-Item -Path $baseKey -Force | Out-Null
+    }
 
+    $badUNC = (Get-ItemProperty -Path $baseKey -Name 'BadUNC' -ErrorAction SilentlyContinue).BadUNC
+    if (-not $badUNC) {
+        $token = ([guid]::NewGuid().ToString('N')).Substring(0,12)
+        $host = "ghost-$token"
+        $badUNC = "\\$host\share"
+        New-ItemProperty -Path $baseKey -Name 'BadUNC' -PropertyType String -Value $badUNC -Force | Out-Null
+    }
+
+    New-ItemProperty -Path $baseKey -Name 'DriveLetter' -PropertyType String -Value $driveLetter -Force | Out-Null
+
+    $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
     if (-not (Test-Path $runKey)) {
         New-Item -Path $runKey -Force | Out-Null
     }
+    $valueName = "BadMap_$driveLetter"
+    $dl = "$driveLetter`:"
+    $cmd = "cmd.exe /c net use $dl /delete /y 2>nul & net use $dl $badUNC /persistent:yes"
     New-ItemProperty -Path $runKey -Name $valueName -PropertyType String -Value $cmd -Force | Out-Null
 
-    Write-Output "broken_state_configured"
+    Write-Output "broken_state_configured:$badUNC"
     exit 0
 }
 catch {
