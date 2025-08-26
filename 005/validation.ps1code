@@ -1,0 +1,72 @@
+[CmdletBinding()]
+param(
+  [Parameter(Mandatory=$false)][double]$min_percent_over_physical = 10,
+  [Parameter(Mandatory=$false)][int]$min_pagefile_mb = 512,
+  [Parameter(Mandatory=$false)][string]$pagefile_path = "C:\pagefile.sys"
+)
+$ErrorActionPreference = 'Stop'
+function OutJson($obj){ $obj | ConvertTo-Json -Depth 6 }
+try{
+  $mmKeyPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management'
+  $physBytes = [int64]((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory)
+  $commitLimitBytes = [int64]((Get-Counter '\Memory\Commit Limit').CounterSamples[0].CookedValue)
+  $percentOver = if($physBytes -gt 0){ [math]::Round((($commitLimitBytes - $physBytes) * 100.0) / $physBytes, 2) } else { 0.0 }
+
+  $mm = Get-ItemProperty -Path $mmKeyPath -ErrorAction SilentlyContinue
+  $autoManaged = $false
+  $pagingFiles = @()
+  if($mm){
+    $autoManaged = ($mm.AutomaticManagedPagefile -eq 1)
+    $pf = $mm.PagingFiles
+    if($pf){
+      if($pf -is [string]){ $pagingFiles = @($pf) }
+      elseif($pf -is [System.Array]){ $pagingFiles = @($pf | ForEach-Object { $_.ToString() }) }
+    }
+  }
+
+  $pfExists = Test-Path -LiteralPath $pagefile_path
+  $pfSizeMb = 0
+  if($pfExists){
+    try{ $pfSizeMb = [int]([math]::Round((Get-Item -LiteralPath $pagefile_path).Length/1MB)) }catch{ $pfSizeMb = 0 }
+  }
+
+  $pass = ($commitLimitBytes -gt [int64]($physBytes * (1.0 + ($min_percent_over_physical/100.0)))) -and ($pfExists -and ($pfSizeMb -ge $min_pagefile_mb))
+
+  $notes = if($pass){
+    "Paging file enabled: commit limit is $percentOver% above physical and pagefile size is ${pfSizeMb}MB."
+  } else {
+    "Paging file not validated: commit limit over physical = $percentOver%, pagefile exists = $pfExists, sizeMB = $pfSizeMb."
+  }
+
+  $out = [ordered]@{
+    pass = $pass
+    measured_values = [ordered]@{
+      commit_limit_gb = [math]::Round($commitLimitBytes/1GB,2)
+      physical_memory_gb = [math]::Round($physBytes/1GB,2)
+      percent_over_physical = $percentOver
+      automatic_managed_pagefile = $autoManaged
+      pagingfiles = @($pagingFiles)
+      pagefile_exists = $pfExists
+      pagefile_size_mb = $pfSizeMb
+    }
+    notes = $notes
+  }
+  OutJson $out
+  exit 0
+}catch{
+  $out = [ordered]@{
+    pass = $false
+    measured_values = [ordered]@{
+      commit_limit_gb = 0
+      physical_memory_gb = 0
+      percent_over_physical = 0
+      automatic_managed_pagefile = $false
+      pagingfiles = @()
+      pagefile_exists = $false
+      pagefile_size_mb = 0
+    }
+    notes = "validation_error: $($_.Exception.Message)"
+  }
+  OutJson $out
+  exit 1
+}
