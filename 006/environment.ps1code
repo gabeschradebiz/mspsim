@@ -1,0 +1,44 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+# Admin check
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Error 'AdminRightsRequired'
+    exit 1
+}
+
+# GUIDs
+$Scheme_PowerSaver = 'a1841308-3541-4fab-bc81-f71556f20b4a'
+$Sub_Processor     = '54533251-82be-4824-96c1-47b60b740d00'
+$Set_MaxProc       = 'bc5038f7-23e0-4960-96da-33abaf5935ec'
+$Set_CoolingPolicy = '94d3a615-a899-4ac5-ae2b-e4d8f634367f'
+
+# Broken state values
+$MaxPercent  = 30      # throttle CPU
+$CoolingMode = 1       # 0=Active, 1=Passive
+
+try {
+    # Ensure indices on Power Saver scheme (idempotent)
+    & powercfg -setacvalueindex $Scheme_PowerSaver $Sub_Processor $Set_MaxProc $MaxPercent | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SetACMaxProcFailed:$LASTEXITCODE" }
+    & powercfg -setdcvalueindex $Scheme_PowerSaver $Sub_Processor $Set_MaxProc $MaxPercent | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SetDCMaxProcFailed:$LASTEXITCODE" }
+
+    & powercfg -setacvalueindex $Scheme_PowerSaver $Sub_Processor $Set_CoolingPolicy $CoolingMode | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SetACCoolingFailed:$LASTEXITCODE" }
+    & powercfg -setdcvalueindex $Scheme_PowerSaver $Sub_Processor $Set_CoolingPolicy $CoolingMode | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SetDCCoolingFailed:$LASTEXITCODE" }
+
+    # Activate Power Saver scheme (applies settings)
+    & powercfg -setactive $Scheme_PowerSaver | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "SetActiveFailed:$LASTEXITCODE" }
+
+    # Minimal machine-readable confirmation
+    Write-Output 'broken_state_applied=1'
+    exit 0
+}
+catch {
+    Write-Error ("inject_failed=" + $_.Exception.Message)
+    exit 2
+}
