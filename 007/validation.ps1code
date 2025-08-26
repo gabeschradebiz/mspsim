@@ -1,0 +1,38 @@
+param(
+    [string]$UserSamAccountName = 'locked.user'
+)
+$ErrorActionPreference = 'Stop'
+try { Import-Module ActiveDirectory -ErrorAction Stop } catch {
+    $out = @{ pass = $false; measured_values = @{ locked_out = $null; bad_pwd_count = $null; last_bad_pwd_utc = $null; lockout_threshold = $null }; notes = "ActiveDirectory module not found" }
+    $out | ConvertTo-Json -Depth 4
+    exit 1
+}
+try {
+    $u = Get-ADUser -Filter "SamAccountName -eq '$UserSamAccountName'" -Properties LockedOut,BadPwdCount,LastBadPasswordAttempt
+    if(-not $u){
+        $out = @{ pass = $false; measured_values = @{ locked_out = $null; bad_pwd_count = $null; last_bad_pwd_utc = $null; lockout_threshold = (Get-ADDefaultDomainPasswordPolicy).LockoutThreshold }; notes = "User not found: $UserSamAccountName" }
+        $out | ConvertTo-Json -Depth 4
+        exit 1
+    }
+    $pol = Get-ADDefaultDomainPasswordPolicy
+    $lockedOut = [bool]$u.LockedOut
+    $badCount = [int]$u.BadPwdCount
+    $lastBad = if($u.LastBadPasswordAttempt){ $u.LastBadPasswordAttempt.ToUniversalTime().ToString("o") } else { $null }
+    $pass = -not $lockedOut
+    $result = [ordered]@{
+        pass = $pass
+        measured_values = [ordered]@{
+            locked_out = $lockedOut
+            bad_pwd_count = $badCount
+            last_bad_pwd_utc = $lastBad
+            lockout_threshold = [int]$pol.LockoutThreshold
+        }
+        notes = if($pass){ "Account $($u.SamAccountName) is unlocked." } else { "Account $($u.SamAccountName) remains locked." }
+    }
+    $result | ConvertTo-Json -Depth 4
+    if($pass){ exit 0 } else { exit 2 }
+} catch {
+    $out = @{ pass = $false; measured_values = @{ locked_out = $null; bad_pwd_count = $null; last_bad_pwd_utc = $null; lockout_threshold = $null }; notes = $_.Exception.Message }
+    $out | ConvertTo-Json -Depth 4
+    exit 1
+}
