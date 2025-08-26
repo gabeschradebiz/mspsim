@@ -1,0 +1,21 @@
+$ErrorActionPreference = 'Stop'
+try {
+    $driveLetter = 'X'
+    $badUNC = '\\203.0.113.10\share'
+    $runKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    $valueName = "BadMap_$driveLetter"
+    $dl = "$driveLetter`:"
+    $cmd = "cmd.exe /c net use $dl /delete /y 2>nul & net use $dl $badUNC /persistent:yes"
+
+    if (-not (Test-Path $runKey)) {
+        New-Item -Path $runKey -Force | Out-Null
+    }
+    New-ItemProperty -Path $runKey -Name $valueName -PropertyType String -Value $cmd -Force | Out-Null
+
+    Write-Output "broken_state_configured"
+    exit 0
+}
+catch {
+    Write-Error ($_.Exception.Message)
+    exit 1
+}
