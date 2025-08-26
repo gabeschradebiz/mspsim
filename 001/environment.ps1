@@ -1,51 +1,42 @@
 [CmdletBinding()]
 param(
-[string[]]$RunItemNames=@("CL_AcmeUpdater","CL_ContosoChat"),
-[string]$ScheduledTaskName="CL_FabrikamTelemetry",
-[int]$DelaySeconds=90,
-[string]$WorkDir="C:\ProgramData\CloudLabs\SlowBoot",
-[string]$SlowScriptName="slowstart.ps1",
-[string]$StartupLinkPath="C:\ProgramData\Microsoft\Windows\Start Menu\Programs\Startup\CloudLabsSlowStart.lnk"
+    [Parameter()][ValidateRange(3,12)][int]$startup_count = 8,
+    [Parameter()][ValidateRange(5,120)][int]$script_runtime_seconds = 20
 )
-$ErrorActionPreference='Stop'
+$ErrorActionPreference = 'Stop'
 try {
-New-Item -Path $WorkDir -ItemType Directory -Force | Out-Null
-$slowScriptPath = Join-Path $WorkDir $SlowScriptName
-Set-Content -Path $slowScriptPath -Value "Start-Sleep -Seconds $DelaySeconds" -Encoding ASCII
+    $baseDir = 'C:\ProgramData\CLStartupBloat'
+    if (-not (Test-Path -LiteralPath $baseDir)) {
+        New-Item -ItemType Directory -Path $baseDir | Out-Null
+    }
 
-$runPath="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run"
-if (!(Test-Path $runPath)){ New-Item -Path $runPath -Force | Out-Null }
-$approvedPath="HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run"
-if (!(Test-Path $approvedPath)){ New-Item -Path $approvedPath -Force | Out-Null }
+    $runKeyPath = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Run'
+    if (-not (Test-Path -LiteralPath $runKeyPath)) {
+        New-Item -Path $runKeyPath -Force | Out-Null
+    }
 
-$command = "powershell.exe -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$slowScriptPath""
-foreach ($name in $RunItemNames){
-New-ItemProperty -Path $runPath -Name $name -Value $command -PropertyType String -Force | Out-Null
-$enabled = byte[]
-New-ItemProperty -Path $approvedPath -Name $name -PropertyType Binary -Value $enabled -Force | Out-Null
+    for ($i = 1; $i -le $startup_count; $i++) {
+        $appName = "CLStart_App$($i)"
+        $scriptPath = Join-Path $baseDir "CLBloat_App$($i).ps1"
+
+        $scriptContent = @"
+param([int]`$Seconds = $script_runtime_seconds)
+try { Start-Process -FilePath "notepad.exe" -WindowStyle Minimized -ErrorAction SilentlyContinue | Out-Null } catch {}
+`$sw = [Diagnostics.Stopwatch]::StartNew()
+while (`$sw.Elapsed.TotalSeconds -lt `$Seconds) {
+    [void][Math]::Sqrt((Get-Random -Minimum 1000 -Maximum 100000))
 }
-
-$action = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$slowScriptPath""
-$trigger = New-ScheduledTaskTrigger -AtLogOn
-$principal = New-ScheduledTaskPrincipal -GroupId "Users" -RunLevel LeastPrivilege
-if (Get-ScheduledTask -TaskName $ScheduledTaskName -ErrorAction SilentlyContinue){
-Set-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
-Enable-ScheduledTask -TaskName $ScheduledTaskName | Out-Null
-} else {
-Register-ScheduledTask -TaskName $ScheduledTaskName -Action $action -Trigger $trigger -Principal $principal | Out-Null
-}
-
-$wsh = New-Object -ComObject WScript.Shell
-$shortcut = $wsh.CreateShortcut($StartupLinkPath)
-$shortcut.TargetPath = "powershell.exe"
-$shortcut.Arguments = "-NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File "$slowScriptPath""
-$shortcut.WorkingDirectory = $WorkDir
-$shortcut.WindowStyle = 7
-$shortcut.Save()
-
-Write-Output ("status=ok;run_items={0};task=enabled;link={1}" -f $RunItemNames.Count,$StartupLinkPath)
 exit 0
-} catch {
-Write-Error ("error=" + $_.Exception.Message)
-exit 1
+"@
+
+        Set-Content -LiteralPath $scriptPath -Value $scriptContent -Encoding UTF8
+
+        $runValue = "powershell.exe -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -Seconds $script_runtime_seconds"
+        New-ItemProperty -Path $runKeyPath -Name $appName -Value $runValue -PropertyType String -Force | Out-Null
+    }
+    exit 0
+}
+catch {
+    Write-Error ("inject_failed: {0}" -f $_.Exception.Message)
+    exit 1
 }
