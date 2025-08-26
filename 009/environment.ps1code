@@ -1,0 +1,33 @@
+$ErrorActionPreference = 'Stop'
+function Set-Dword {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('HKEY_LOCAL_MACHINE','HKEY_CURRENT_USER')]$Hive,
+        [Parameter(Mandatory=$true)][string]$Path,
+        [Parameter(Mandatory=$true)][string]$Name,
+        [Parameter(Mandatory=$true)][int]$Value
+    )
+    $regPath = "Registry::$Hive\$Path"
+    if (-not (Test-Path $regPath)) { New-Item -Path $regPath -Force | Out-Null }
+    New-ItemProperty -Path $regPath -Name $Name -PropertyType DWord -Value $Value -Force | Out-Null
+}
+try {
+    $polPath = 'SOFTWARE\Policies\Microsoft\Office\16.0\Common\Identity'
+    Set-Dword -Hive 'HKEY_LOCAL_MACHINE' -Path $polPath -Name 'EnableADAL' -Value 0
+    Set-Dword -Hive 'HKEY_LOCAL_MACHINE' -Path $polPath -Name 'DisableAADWAM' -Value 1
+
+    $cuPath = 'Software\Microsoft\Office\16.0\Common\Identity'
+    try { Set-Dword -Hive 'HKEY_CURRENT_USER' -Path $cuPath -Name 'EnableADAL' -Value 0 } catch {}
+    try { Set-Dword -Hive 'HKEY_CURRENT_USER' -Path $cuPath -Name 'DisableAADWAM' -Value 1 } catch {}
+
+    $lm = Get-ItemProperty -Path "Registry::HKEY_LOCAL_MACHINE\$polPath" -ErrorAction Stop
+    if (($lm.EnableADAL -ne 0) -or ($lm.DisableAADWAM -ne 1)) {
+        Write-Error 'Failed to enforce Modern Auth disable policy in HKLM.'
+        exit 1
+    }
+    Write-Output 'broken_state=modern_auth_disabled'
+    exit 0
+}
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
