@@ -1,0 +1,56 @@
+# Validates that the misconfigured QoS throttle is no longer applied
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'SilentlyContinue'
+
+$name = 'CloudLabsThrottle'
+
+function Out-ResultJson {
+    param(
+        [bool]$Pass,
+        [bool]$PolicyPresent,
+        [Nullable[int]]$ThrottleKbps,
+        [string]$Notes
+    )
+    $obj = [ordered]@{
+        pass = $Pass
+        measured_values = [ordered]@{
+            policy_present = $PolicyPresent
+            throttle_kbps = $ThrottleKbps
+        }
+        notes = $Notes
+    }
+    $json = $obj | ConvertTo-Json -Depth 4 -Compress
+    Write-Output $json
+}
+
+try {
+    if (-not (Get-Module -ListAvailable -Name NetQos)) {
+        Out-ResultJson -Pass:$false -PolicyPresent:$false -ThrottleKbps:$null -Notes:"NetQos module not available"
+        exit 0
+    }
+    Import-Module NetQos -ErrorAction Stop
+
+    $p = Get-NetQosPolicy -Name $name -ErrorAction SilentlyContinue
+    $present = $null -ne $p
+
+    $throttle = $null
+    if ($present) {
+        if ($p.PSObject.Properties.Name -contains 'ThrottleRateActionKbps') {
+            $throttle = [int]$p.ThrottleRateActionKbps
+        }
+    }
+
+    $active = $present -and ($throttle -gt 0)
+    $pass = -not $active
+    $note = if ($active) { "QoS throttle still configured: $throttle Kbps" } elseif ($present -and ($throttle -le 0)) { "QoS policy present but not throttling" } else { "No CloudLabsThrottle QoS policy detected" }
+
+    Out-ResultJson -Pass:$pass -PolicyPresent:$present -ThrottleKbps:$throttle -Notes:$note
+    exit 0
+}
+catch {
+    Out-ResultJson -Pass:$false -PolicyPresent:$false -ThrottleKbps:$null -Notes:("validation_error:"+($_.Exception.Message -replace '\r|\n',' '))
+    exit 0
+}
