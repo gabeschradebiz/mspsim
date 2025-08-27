@@ -1,0 +1,37 @@
+param(
+    [string]$bad_dns_ipv4 = "203.0.113.53",
+    [string]$interface_name = ""
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+function Fail($m){ Write-Error $m; exit 1 }
+try{
+    # Pick the primary IPv4 interface (with default gateway); fall back to first up IPv4 adapter
+    $ipcfg = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -eq 'Up' }
+    if($interface_name){ $ipcfg = $ipcfg | Where-Object { $_.NetAdapter.InterfaceAlias -eq $interface_name } }
+    if(-not $ipcfg){ $ipcfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -ne $null -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1 }
+    if(-not $ipcfg){ Fail "No active IPv4 interface found." }
+
+    $ifaceIndex = $ipcfg.InterfaceIndex
+    $dnsInfo = Get-DnsClientServerAddress -InterfaceIndex $ifaceIndex -AddressFamily IPv4
+    $existingGood = @($dnsInfo.ServerAddresses | Where-Object { $_ -and $_ -ne $bad_dns_ipv4 })
+
+    $newList = @()
+    if($existingGood.Count -ge 1){
+        $newList = @($bad_dns_ipv4, $existingGood[0])
+    } else {
+        # If no prior DNS was detected, still enforce a broken state using only the bad DNS
+        $newList = @($bad_dns_ipv4)
+    }
+
+    Set-DnsClientServerAddress -InterfaceIndex $ifaceIndex -ServerAddresses $newList -ErrorAction Stop
+
+    # Idempotent: re-running keeps same order with bad DNS first.
+    Write-Output ("AppliedBrokenDns={0};InterfaceIndex={1};Servers={2}" -f $true,$ifaceIndex,($newList -join ","))
+
+    exit 0
+}
+catch{
+    Write-Error ($_ | Out-String)
+    exit 1
+}
