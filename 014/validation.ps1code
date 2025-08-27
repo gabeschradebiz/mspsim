@@ -1,0 +1,53 @@
+param(
+    [string]$TestFqdn = "intranet.corp.contoso.com",
+    [int]$HttpTimeoutSeconds = 6,
+    [string]$ExpectedString = "CloudLabs Intranet OK"
+)
+$ErrorActionPreference = "SilentlyContinue"
+
+$dnsResolved = $false
+$ipList = @()
+$tcpSuccess = $false
+$httpStatus = 0
+$contentMatch = $false
+
+try {
+    $res = Resolve-DnsName -Name $TestFqdn -Type A -ErrorAction Stop
+    $ipList = ($res | Where-Object { $_.Type -eq 'A' } | Select-Object -ExpandProperty IPAddress)
+    if ($ipList.Count -gt 0) { $dnsResolved = $true }
+} catch {}
+
+try {
+    $tcpSuccess = (Test-NetConnection -ComputerName $TestFqdn -Port 80 -WarningAction SilentlyContinue).TcpTestSucceeded
+} catch {}
+
+$sw = [System.Diagnostics.Stopwatch]::StartNew()
+try {
+    $resp = Invoke-WebRequest -Uri ("http://{0}/" -f $TestFqdn) -UseBasicParsing -TimeoutSec $HttpTimeoutSeconds -ErrorAction Stop
+    $httpStatus = [int]$resp.StatusCode
+    if ($resp.Content -like ("*{0}*" -f $ExpectedString)) { $contentMatch = $true }
+} catch {}
+$sw.Stop()
+
+$pass = ($dnsResolved -and $tcpSuccess -and ($httpStatus -eq 200) -and $contentMatch)
+
+if ($pass) {
+    $notes = "HTTP 200 from $TestFqdn with expected content."
+} else {
+    $notes = "Validation failed. dns_resolved=$dnsResolved; tcp_port_80=$tcpSuccess; http_status=$httpStatus; content_match=$contentMatch."
+}
+
+$result = [ordered]@{
+    pass = $pass
+    measured_values = [ordered]@{
+        fqdn = $TestFqdn
+        dns_resolved = $dnsResolved
+        ip_list = @($ipList)
+        tcp_port_80 = $tcpSuccess
+        http_status = $httpStatus
+        content_match = $contentMatch
+        response_time_ms = [int]$sw.ElapsedMilliseconds
+    }
+    notes = $notes
+}
+$result | ConvertTo-Json -Depth 5
