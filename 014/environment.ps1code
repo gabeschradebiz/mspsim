@@ -1,0 +1,49 @@
+param(
+    [string]$ZoneName = "corp.contoso.com",
+    [string]$RecordName = "intranet",
+    [string]$WrongIp = "203.0.113.10",
+    [string]$WebContent = "CloudLabs Intranet OK"
+)
+$ErrorActionPreference = "Stop"
+try {
+    # Ensure IIS Web Server is installed and running
+    if (-not (Get-WindowsFeature -Name Web-Server).Installed) {
+        Install-WindowsFeature -Name Web-Server -IncludeManagementTools | Out-Null
+    }
+    if ((Get-Service -Name W3SVC).Status -ne 'Running') {
+        Start-Service -Name W3SVC
+    }
+
+    # Publish deterministic landing page
+    $html = "<html><head><title>Intranet</title></head><body><h1>$WebContent</h1></body></html>"
+    $pagePath = "C:\inetpub\wwwroot\index.html"
+    if (-not (Test-Path $pagePath) -or ((Get-Content -Path $pagePath -Raw) -notmatch [regex]::Escape($WebContent))) {
+        New-Item -ItemType File -Path $pagePath -Force | Out-Null
+        Set-Content -Path $pagePath -Value $html -Encoding UTF8
+    }
+
+    # Ensure DNS zone exists and set incorrect A record
+    Import-Module DnsServer -ErrorAction Stop
+    $zone = Get-DnsServerZone -Name $ZoneName -ErrorAction SilentlyContinue
+    if (-not $zone) {
+        Add-DnsServerPrimaryZone -Name $ZoneName -ReplicationScope "Domain" | Out-Null
+    }
+
+    # Remove any existing 'intranet' A records to keep state deterministic
+    $existing = Get-DnsServerResourceRecord -ZoneName $ZoneName -Name $RecordName -RRType A -ErrorAction SilentlyContinue
+    if ($existing) {
+        foreach ($rec in $existing) {
+            Remove-DnsServerResourceRecord -ZoneName $ZoneName -RRType A -Name $RecordName -RecordData $rec.RecordData -Force
+        }
+    }
+
+    # Add the wrong A record (broken state)
+    Add-DnsServerResourceRecordA -ZoneName $ZoneName -Name $RecordName -IPv4Address $WrongIp -TimeToLive ([TimeSpan]::FromMinutes(30)) | Out-Null
+
+    Write-Output "broken_state: dns_a_record_wrong $RecordName.$ZoneName -> $WrongIp"
+    exit 0
+}
+catch {
+    Write-Error $_.Exception.Message
+    exit 1
+}
