@@ -1,0 +1,72 @@
+[CmdletBinding()]
+param(
+  [string]$InterfaceAlias = "",
+  [string]$TargetIP = ""
+)
+$ErrorActionPreference = 'Stop'
+try {
+    # Select primary Up adapter if alias not provided
+    if ($InterfaceAlias -and (Get-NetAdapter -Name $InterfaceAlias -ErrorAction SilentlyContinue)) {
+        $if = Get-NetAdapter -Name $InterfaceAlias
+    } else {
+        $if = Get-NetAdapter | Where-Object {$_.Status -eq 'Up'} | Sort-Object -Property ifIndex | Select-Object -First 1
+    }
+    if (-not $if) { throw "NO_ADAPTER" }
+
+    # Determine DC IPv4 if not provided
+    $dcIP = $TargetIP
+    if (-not $dcIP) {
+        $dcHost = ($env:LOGONSERVER -replace '^\\\\','')
+        $domain = $env:USERDNSDOMAIN
+        $candidates = @()
+        if ($dcHost) {
+            if ($domain) { $candidates += "$dcHost.$domain" }
+            $candidates += $dcHost
+        }
+        foreach ($h in $candidates) {
+            try {
+                $rec = Resolve-DnsName -Name $h -Type A -ErrorAction Stop | Where-Object {$_.Type -eq 'A'} | Select-Object -First 1
+                if ($rec) { $dcIP = $rec.IPAddress; break }
+            } catch {}
+        }
+        if (-not $dcIP -and $domain) {
+            $nl = nltest /dsgetdc:$domain 2>$null
+            $m = ($nl | Select-String -Pattern 'Address:\s+\\?([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)' -AllMatches)
+            if ($m -and $m.Matches.Count -gt 0) { $dcIP = $m.Matches[0].Groups[1].Value }
+        }
+        if (-not $dcIP) { throw "DC_IP_RESOLVE_FAILED" }
+    }
+
+    # If already in broken state, be idempotent
+    $curDhcp = (Get-NetIPInterface -InterfaceIndex $if.IfIndex -AddressFamily IPv4).Dhcp
+    $curIPs = Get-NetIPAddress -InterfaceIndex $if.IfIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    if ($curIPs -and ($curIPs.IPAddress -contains $dcIP) -and $curDhcp -eq 'Disabled') {
+        Write-Output "already_broken ip=$dcIP iface=$($if.Name)"
+        exit 0
+    }
+
+    # Capture prefix and gateway from current config
+    $cfg = Get-NetIPConfiguration -InterfaceIndex $if.IfIndex
+    $prefix = ($cfg.IPv4Address | Select-Object -First 1).PrefixLength
+    if (-not $prefix) { $prefix = 24 }
+    $gw = $cfg.IPv4DefaultGateway.NextHop
+    if (-not $gw) {
+        $ip = ($cfg.IPv4Address | Select-Object -First 1).IPv4Address
+        if ($ip) {
+            $oct = $ip.Split('.')
+            $gw = "$($oct[0]).$($oct[1]).$($oct[2]).1"
+        }
+    }
+
+    # Disable DHCP and apply the conflicting static IP
+    Set-NetIPInterface -InterfaceIndex $if.IfIndex -Dhcp Disabled | Out-Null
+    $existing = Get-NetIPAddress -InterfaceIndex $if.IfIndex -AddressFamily IPv4 -ErrorAction SilentlyContinue
+    if ($existing) { $existing | ForEach-Object { Remove-NetIPAddress -InputObject $_ -Confirm:$false } }
+    New-NetIPAddress -InterfaceIndex $if.IfIndex -IPAddress $dcIP -PrefixLength $prefix -DefaultGateway $gw | Out-Null
+
+    Write-Output "broken_state applied duplicate_ip=$dcIP iface=$($if.Name)"
+    exit 0
+} catch {
+    Write-Error ("inject_failed: " + $_.ToString())
+    exit 1
+}
