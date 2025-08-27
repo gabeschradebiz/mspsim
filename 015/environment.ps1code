@@ -1,0 +1,56 @@
+# Requires: Windows 10/11 with NetQos module and local admin
+# Purpose: Deterministically apply a per-machine QoS throttle to create slow network performance
+
+[CmdletBinding()]
+param()
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+try {
+    # Ensure elevated
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Error "elevation_required"
+        exit 1
+    }
+
+    # Import NetQos module
+    if (-not (Get-Module -ListAvailable -Name NetQos)) {
+        Write-Error "module_missing:NetQos"
+        exit 1
+    }
+    Import-Module NetQos -ErrorAction Stop
+
+    $name = 'CloudLabsThrottle'
+    $rate = 128  # Kbps
+    $direction = 'Outbound'
+
+    $existing = Get-NetQosPolicy -Name $name -ErrorAction SilentlyContinue
+
+    if ($null -eq $existing) {
+        New-NetQosPolicy -Name $name -Default -Direction $direction -ThrottleRateActionKbps $rate | Out-Null
+    }
+    else {
+        # Ensure policy is set to the desired broken state
+        $needUpdate = $false
+        if ($existing.ThrottleRateActionKbps -ne $rate) { $needUpdate = $true }
+        if ($existing.Direction -ne $direction) { $needUpdate = $true }
+        if ($needUpdate) {
+            Set-NetQosPolicy -Name $name -Direction $direction -ThrottleRateActionKbps $rate | Out-Null
+        }
+    }
+
+    $verify = Get-NetQosPolicy -Name $name -ErrorAction SilentlyContinue
+    if ($null -eq $verify -or $verify.ThrottleRateActionKbps -ne $rate) {
+        Write-Error "apply_failed"
+        exit 1
+    }
+
+    Write-Output "status=broken_state_applied;policy=$name;rateKbps=$rate"
+    exit 0
+}
+catch {
+    Write-Error ("error:"+($_.Exception.Message -replace '\r|\n',' '))
+    exit 1
+}
