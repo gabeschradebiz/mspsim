@@ -1,0 +1,42 @@
+param(
+    [string]$ServiceName = 'WlanSvc'
+)
+$ErrorActionPreference = 'SilentlyContinue'
+function Out-Result {
+    param(
+        [bool]$Pass,
+        [string]$StartMode,
+        [string]$State,
+        [int]$RegStart,
+        [string]$Notes
+    )
+    $obj = [ordered]@{
+        pass = $Pass
+        measured_values = @{
+            start_mode = $StartMode
+            state = $State
+            registry_start_dword = $RegStart
+        }
+        notes = $Notes
+    }
+    $obj | ConvertTo-Json -Compress
+}
+try {
+    $cim = Get-CimInstance Win32_Service -Filter "Name='$ServiceName'"
+    if (-not $cim) {
+        Out-Result -Pass:$false -StartMode 'not_found' -State 'not_found' -RegStart -1 -Notes "Service $ServiceName not found."
+        return
+    }
+    $startMode = $cim.StartMode
+    $state = $cim.State
+    $regStart = -1
+    try {
+        $regStart = (Get-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName" -Name Start).Start
+    } catch { $regStart = -1 }
+
+    $pass = ($startMode -eq 'Auto' -and $state -eq 'Running' -and $regStart -ne 4)
+    $notes = if ($pass) { "WLAN AutoConfig is Automatic and Running." } else { "WLAN AutoConfig not set correctly (StartMode=$startMode, State=$state, RegStart=$regStart)." }
+    Out-Result -Pass:$pass -StartMode $startMode -State $state -RegStart $regStart -Notes $notes
+} catch {
+    Out-Result -Pass:$false -StartMode 'error' -State 'error' -RegStart -1 -Notes ("Validation error: " + $_.Exception.Message)
+}
