@@ -1,0 +1,48 @@
+param(
+    [string]$ServiceName = 'WlanSvc'
+)
+$ErrorActionPreference = 'Stop'
+try {
+    $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+    if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Error "admin_required"
+        exit 1
+    }
+
+    try {
+        $svc = Get-Service -Name $ServiceName -ErrorAction Stop
+    } catch {
+        Write-Error "service_not_found"
+        exit 2
+    }
+
+    try {
+        Set-Service -Name $ServiceName -StartupType Disabled
+    } catch {
+        Write-Error "set_startup_failed"
+        exit 3
+    }
+
+    try {
+        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+    } catch {
+        # intentionally ignore stop errors to keep idempotency
+    }
+
+    $regPath = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName"
+    try {
+        if (-not (Test-Path $regPath)) {
+            New-Item -Path $regPath -Force | Out-Null
+        }
+        Set-ItemProperty -Path $regPath -Name Start -Type DWord -Value 4
+    } catch {
+        Write-Error "registry_write_failed"
+        exit 4
+    }
+
+    Write-Output "broken_state_applied=$ServiceName"
+    exit 0
+} catch {
+    Write-Error "unexpected_error:$($_.Exception.Message)"
+    exit 99
+}
