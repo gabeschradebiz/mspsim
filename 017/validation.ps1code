@@ -1,0 +1,102 @@
+param(
+    [string]$interface_name = "",
+    [string[]]$blocked_public_dns = @("8.8.8.8","8.8.4.4","1.1.1.1","1.0.0.1","9.9.9.9","149.112.112.112","203.0.113.53")
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "SilentlyContinue"
+
+function IsPrivateIPv4([string]$ip){
+    try{
+        $addr = [System.Net.IPAddress]::Parse($ip)
+        if(-not $addr.AddressFamily.ToString().Contains("V4")){ return $false }
+        $b = $addr.GetAddressBytes()
+        $n = ($b[0] -shl 24) -bor ($b[1] -shl 16) -bor ($b[2] -shl 8) -bor $b[3]
+        # 10.0.0.0/8
+        if(($n -band 0xFF000000) -eq 0x0A000000){ return $true }
+        # 172.16.0.0/12
+        if(($n -band 0xFFF00000) -eq 0xAC100000){ return $true }
+        # 192.168.0.0/16
+        if(($n -band 0xFFFF0000) -eq 0xC0A80000){ return $true }
+        return $false
+    } catch { return $false }
+}
+
+try{
+    $ipcfg = Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway -ne $null -and $_.NetAdapter.Status -eq 'Up' }
+    if($interface_name){ $ipcfg = $ipcfg | Where-Object { $_.NetAdapter.InterfaceAlias -eq $interface_name } }
+    if(-not $ipcfg){ $ipcfg = Get-NetIPConfiguration | Where-Object { $_.IPv4Address -ne $null -and $_.NetAdapter.Status -eq 'Up' } | Select-Object -First 1 }
+
+    $adapterName = $null
+    $addrOrigin = $null
+    $servers = @()
+    if($ipcfg){
+        $adapterName = $ipcfg.NetAdapter.InterfaceAlias
+        $dnsInfo = Get-DnsClientServerAddress -InterfaceIndex $ipcfg.InterfaceIndex -AddressFamily IPv4
+        $addrOrigin = [string]$dnsInfo.AddressOrigin
+        $servers = @($dnsInfo.ServerAddresses | Where-Object { $_ })
+    }
+
+    $dnsCount = $servers.Count
+    $primary = if($dnsCount -gt 0){ $servers[0] } else { $null }
+    $firstIsPrivate = if($primary){ IsPrivateIPv4 $primary } else { $false }
+    $privateOnly = if($dnsCount -gt 0){ (@($servers | Where-Object { -not (IsPrivateIPv4 $_) }).Count -eq 0) } else { $false }
+    $blockedPresent = if($dnsCount -gt 0){ (@($servers | Where-Object { $blocked_public_dns -contains $_ }).Count -gt 0) } else { $false }
+
+    $domain = $env:USERDNSDOMAIN
+    $domainResolveSuccess = $false
+    $elapsedMs = 0
+    if($domain -and $primary){
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        try{
+            Resolve-DnsName -Name $domain -Type SOA -Server $primary -ErrorAction Stop | Out-Null
+            $domainResolveSuccess = $true
+        } catch {
+            $domainResolveSuccess = $false
+        }
+        $sw.Stop()
+        $elapsedMs = [int]$sw.ElapsedMilliseconds
+    }
+
+    $pass = ($firstIsPrivate -and -not $blockedPresent -and ($addrOrigin -eq "Dhcp" -or $dnsCount -eq 1) -and $domainResolveSuccess)
+
+    $out = [ordered]@{
+        pass = $pass
+        measured_values = [ordered]@{
+            adapter_name = $adapterName
+            address_origin = $addrOrigin
+            dns_servers = $servers
+            primary_dns = $primary
+            dns_count = $dnsCount
+            first_is_private = $firstIsPrivate
+            private_dns_only = $privateOnly
+            blocked_dns_present = $blockedPresent
+            domain_resolve_success = $domainResolveSuccess
+            domain_resolve_ms = $elapsedMs
+        }
+        notes = if($pass){
+            "Primary DNS is private/corporate and domain resolution via primary succeeded."
+        } else {
+            "DNS still misconfigured or domain resolution failed; check DNS order and ensure DHCP/only corporate DNS is configured."
+        }
+    }
+    $out | ConvertTo-Json -Depth 6
+} catch {
+    $out = @{
+        pass = $false
+        measured_values = @{
+            adapter_name = $null
+            address_origin = $null
+            dns_servers = @()
+            primary_dns = $null
+            dns_count = 0
+            first_is_private = $false
+            private_dns_only = $false
+            blocked_dns_present = $false
+            domain_resolve_success = $false
+            domain_resolve_ms = 0
+        }
+        notes = "Validation script error: $($_.Exception.Message)"
+    }
+    $out | ConvertTo-Json -Depth 6
+    exit 0
+}
